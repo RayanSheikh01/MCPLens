@@ -1,0 +1,20 @@
+# Secrets — config holds bearer tokens
+config.yaml
+
+# SQLite storage
+*.db
+*.db-journal
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Exported sessions
+session*.json
+implemenation_plan.md
+plan.md

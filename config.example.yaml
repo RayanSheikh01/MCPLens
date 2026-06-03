@@ -1,0 +1,9 @@
+# Copy to config.yaml and fill in real upstream URLs + tokens.
+# config.yaml is git-ignored; this template is safe to commit.
+servers:
+  mock:
+    upstream: "http://localhost:9000/mcp"
+    auth: "Bearer test-token"
+
+storage:
+  db_path: "./inspector.db"
