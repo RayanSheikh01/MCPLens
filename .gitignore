@@ -18,3 +18,4 @@ venv/
 session*.json
 implemenation_plan.md
 plan.md
+.vscode/settings.json
