@@ -19,3 +19,6 @@ session*.json
 implemenation_plan.md
 plan.md
 .vscode/settings.json
+.github/workflows/daily-activity-report.md
+.tools/gh-aw-linux-amd64
+.gitattributes
