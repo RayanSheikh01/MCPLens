@@ -82,6 +82,39 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
         hub.unregister(queue)
 
 
+
+@app.post("/api/replay")
+async def replay_call(call: dict):
+    """
+    Replay a captured JSON-RPC call by forwarding it to the appropriate server.
+    """
+    server = call.get("server")
+    path = call.get("path")
+    if not server or not path:
+        return fastapi.Response(content="Missing 'server' or 'path' in call", status_code=400)
+
+    url = f"http://{server}/{path}"
+    headers = call.get("headers", {})
+    body = json.dumps(call.get("body", {})).encode("utf-8")
+
+    client = httpx2.AsyncClient()
+    req = client.build_request("POST", url, headers=headers, content=body)
+    response = await client.send(req)
+    content = await response.aread()
+    await response.aclose()
+    await client.aclose()
+
+    return fastapi.Response(content=content, status_code=response.status_code, headers=dict(response.headers))
+
+@app.get("/api/export")
+async def export_calls():
+    """
+    Export captured calls as JSON.
+    """
+    calls = hub.clients
+    return fastapi.responses.JSONResponse(content=calls)
+
+
 @app.get("/")
 async def root():
     return fastapi.responses.FileResponse("dashboard/index.html")

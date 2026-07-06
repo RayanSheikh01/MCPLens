@@ -1,10 +1,16 @@
 import asyncio
 import json
+import re
 
 import aiosqlite
 import click
 
 DEFAULT_DB = "sessions.db"
+
+# Tool names matching this are treated as state-changing and prompted under --confirm.
+MUTATING = re.compile(
+    r"(send|create|update|delete|remove|add|move|set|complete)", re.IGNORECASE
+)
 
 CALL_COLUMNS = [
     "id", "session_id", "ts", "direction", "tool_name",
@@ -117,6 +123,37 @@ def export(session, output, db_path):
     with open(output, "w", encoding="utf-8") as f:
         json.dump(records, f, indent=2)
     click.echo(f"exported {len(records)} calls to {output}")
+
+
+async def _replay_records(records, confirm=False):
+    from proxy.replay import fire_call
+
+    for r in records:
+        tool = r["tool_name"] or ""
+        if confirm and MUTATING.search(tool):
+            if not click.confirm(f"Fire mutating call '{tool}'?"):
+                click.echo(f"Skipping {tool}")
+                continue
+        click.echo(f"Firing request: {tool}")
+        await fire_call(r)
+
+
+@main.command()
+@click.option("--session", "session", default=None, help="Filter by session id.")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Show what would fire without sending anything.")
+@click.option("--confirm", "confirm", is_flag=True,
+              help="Confirm and fire the captured requests.")
+@click.option("--db", "db_path", default=DEFAULT_DB, help="Database path.")
+def replay(session, dry_run, confirm, db_path):
+    """Replay captured calls for a session."""
+    records = asyncio.run(_fetch_calls(db_path, session))
+    if dry_run:
+        for r in records:
+            click.echo(f"Dry run: would fire {r['tool_name']}")
+        click.echo(f"Dry run complete: {len(records)} call(s) would fire")
+        return
+    asyncio.run(_replay_records(records, confirm=confirm))
 
 
 @main.command()
