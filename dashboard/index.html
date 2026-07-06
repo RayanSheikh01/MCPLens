@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCPLens</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #2f81f7; --row-hover: #1c2430; --row-sel: #253048;
+    --ok: #3fb950; --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 700; letter-spacing: .5px; }
+  #status { font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
+  #status.up { color: var(--ok); border-color: var(--ok); }
+  #status.down { color: var(--err); border-color: var(--err); }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .filters input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 8px; font: inherit; width: 130px;
+  }
+  .filters input:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 5px;
+    padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: .4; cursor: default; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  .table-wrap { flex: 1; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    position: sticky; top: 0; background: var(--panel); text-align: left;
+    padding: 7px 10px; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-weight: 600; white-space: nowrap; z-index: 1;
+  }
+  tbody td { padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--row-hover); }
+  tbody tr.sel { background: var(--row-sel); }
+  td.tool { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .st-success { color: var(--ok); }
+  .st-error { color: var(--err); }
+  .dir { color: var(--muted); }
+
+  .badges { display: flex; gap: 4px; flex-wrap: wrap; }
+  .badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 9px; font-weight: 600;
+    color: #fff; text-transform: lowercase;
+  }
+
+  aside {
+    width: 42%; max-width: 620px; border-left: 1px solid var(--border);
+    background: var(--panel); display: flex; flex-direction: column;
+  }
+  aside.hidden { display: none; }
+  .detail-head {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-head h2 { font-size: 13px; margin: 0; flex: 1; }
+  .detail-head .close { background: none; border: none; color: var(--muted); font-size: 18px; padding: 0 4px; }
+  .detail-body { flex: 1; overflow: auto; padding: 12px 14px; }
+  .detail-body h3 { font-size: 11px; color: var(--muted); margin: 14px 0 5px; text-transform: uppercase; letter-spacing: .5px; }
+  .detail-body h3:first-child { margin-top: 0; }
+  pre {
+    margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  }
+  .k { color: var(--accent); }
+  .s { color: #a5d6ff; }
+  .n { color: #79c0ff; }
+  .b { color: #ffa657; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>MCPLens</h1>
+    <span id="status" class="down">connecting…</span>
+    <div class="filters">
+      <input id="f-tool" placeholder="tool">
+      <input id="f-session" placeholder="session">
+      <input id="f-status" placeholder="status">
+      <input id="f-flag" placeholder="flag">
+      <button id="btn-export" class="ghost">Export</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ts</th><th>dir</th><th>tool</th><th>session</th>
+            <th>status</th><th>lat</th><th>flags</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty">Waiting for calls…</div>
+    </div>
+
+    <aside id="detail" class="hidden">
+      <div class="detail-head">
+        <h2 id="d-title">Call</h2>
+        <button id="btn-replay">Replay</button>
+        <button class="close" id="d-close">×</button>
+      </div>
+      <div class="detail-body">
+        <h3>Record</h3>
+        <pre id="d-record"></pre>
+        <h3>Input</h3>
+        <pre id="d-input"></pre>
+        <h3>Output</h3>
+        <pre id="d-output"></pre>
+      </div>
+    </aside>
+  </main>
+
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const rowsEl = $("rows"), emptyEl = $("empty"), statusEl = $("status");
+  const detailEl = $("detail");
+  const MAX_ROWS = 2000;
+
+  const calls = [];        // all received records
+  const filters = { tool: "", session: "", status: "", flag: "" };
+  let selectedId = null;
+
+  // ---- flag colors -----------------------------------------------------
+  const FLAG_COLORS = {
+    deprecated: "#d29922", error: "#f85149", "high-latency": "#db6d28",
+    "unknown-tool": "#8957e5", warning: "#bb8009", pii: "#e5534b",
+  };
+  function flagColor(flag) {
+    if (FLAG_COLORS[flag]) return FLAG_COLORS[flag];
+    let h = 0;
+    for (const c of flag) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    return `hsl(${h % 360} 55% 45%)`;
+  }
+  function splitFlags(flags) {
+    if (!flags) return [];
+    if (Array.isArray(flags)) return flags.filter(Boolean);
+    return String(flags).split(/[,\s]+/).filter(Boolean);
+  }
+
+  // ---- JSON pretty-print with light syntax coloring --------------------
+  const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" };
+  const esc = s => String(s).replace(/[&<>"'`]/g, c => ESC_MAP[c]);
+  function pretty(value) {
+    let obj = value;
+    if (typeof value === "string") { try { obj = JSON.parse(value); } catch { return esc(value); } }
+    if (obj === undefined) return "—";
+    const json = JSON.stringify(obj, null, 2);
+    return esc(json).replace(
+      /("(\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+\.?\d*/g,
+      (m, str, _c, colon, kw) => {
+        if (str) return `<span class="${colon ? "k" : "s"}">${m}</span>`;
+        if (kw) return `<span class="b">${m}</span>`;
+        return `<span class="n">${m}</span>`;
+      }
+    );
+  }
+
+  // ---- filtering -------------------------------------------------------
+  function matches(c) {
+    const has = (v, q) => !q || String(v ?? "").toLowerCase().includes(q);
+    if (!has(c.tool_name, filters.tool)) return false;
+    if (!has(c.session_id, filters.session)) return false;
+    if (!has(c.status, filters.status)) return false;
+    if (filters.flag && !splitFlags(c.flags).some(f => f.toLowerCase().includes(filters.flag))) return false;
+    return true;
+  }
+
+  // ---- rendering -------------------------------------------------------
+  function fmtTs(ts) {
+    if (ts == null) return "";
+    const d = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
+    return isNaN(d) ? String(ts) : d.toLocaleTimeString([], { hour12: false }) +
+      "." + String(d.getMilliseconds()).padStart(3, "0");
+  }
+  function badges(flags) {
+    return splitFlags(flags)
+      .map(f => `<span class="badge" style="background:${flagColor(f)}">${esc(f)}</span>`)
+      .join("");
+  }
+  function buildRow(c) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = c.id;
+    if (c.id === selectedId) tr.className = "sel";
+    tr.innerHTML =
+      `<td>${esc(fmtTs(c.ts))}</td>` +
+      `<td class="dir">${esc(c.direction ?? "")}</td>` +
+      `<td class="tool" title="${esc(c.tool_name ?? "")}">${esc(c.tool_name ?? "")}</td>` +
+      `<td>${esc(c.session_id ?? "")}</td>` +
+      `<td class="st-${esc(c.status ?? "")}">${esc(c.status ?? "")}</td>` +
+      `<td>${c.latency_ms != null ? esc(c.latency_ms) + "ms" : ""}</td>` +
+      `<td><div class="badges">${badges(c.flags)}</div></td>`;
+    tr.onclick = () => select(c.id);
+    return tr;
+  }
+  function render() {
+    const frag = document.createDocumentFragment();
+    let shown = 0;
+    for (const c of calls) {
+      if (!matches(c)) continue;
+      frag.appendChild(buildRow(c));
+      shown++;
+    }
+    rowsEl.replaceChildren(frag);
+    emptyEl.style.display = shown ? "none" : "block";
+    emptyEl.textContent = calls.length ? "No calls match filters." : "Waiting for calls…";
+  }
+
+  // append a single new row without full re-render (unless filtered out)
+  function appendRow(c) {
+    if (!matches(c)) return;
+    const atBottom = rowsEl.parentElement.scrollTop + rowsEl.parentElement.clientHeight
+      >= rowsEl.parentElement.scrollHeight - 40;
+    rowsEl.appendChild(buildRow(c));
+    emptyEl.style.display = "none";
+    if (atBottom) rowsEl.parentElement.scrollTop = rowsEl.parentElement.scrollHeight;
+  }
+
+  // ---- detail panel ----------------------------------------------------
+  function select(id) {
+    selectedId = id;
+    for (const tr of rowsEl.children) tr.classList.toggle("sel", tr.dataset.id == id);
+    const c = calls.find(x => String(x.id) === String(id));
+    if (!c) return;
+    $("d-title").textContent = `${c.tool_name ?? "call"} · ${c.id}`;
+    $("d-record").innerHTML = pretty(c);
+    $("d-input").innerHTML = pretty(c.input);
+    $("d-output").innerHTML = pretty(c.output);
+    detailEl.classList.remove("hidden");
+  }
+  $("d-close").onclick = () => { detailEl.classList.add("hidden"); selectedId = null; };
+
+  // ---- actions ---------------------------------------------------------
+  $("btn-replay").onclick = async () => {
+    const c = calls.find(x => String(x.id) === String(selectedId));
+    if (!c) return;
+    const btn = $("btn-replay");
+    btn.disabled = true; btn.textContent = "Replaying…";
+    try {
+      const r = await fetch("/api/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(c),
+      });
+      btn.textContent = r.ok ? "Replayed ✓" : "Failed";
+    } catch {
+      btn.textContent = "Failed";
+    }
+    setTimeout(() => { btn.disabled = false; btn.textContent = "Replay"; }, 1500);
+  };
+  $("btn-export").onclick = () => { window.location.href = "/api/export"; };
+
+  // ---- filter inputs ---------------------------------------------------
+  const bind = (id, key) => $(id).addEventListener("input", e => {
+    filters[key] = e.target.value.trim().toLowerCase();
+    render();
+  });
+  bind("f-tool", "tool"); bind("f-session", "session");
+  bind("f-status", "status"); bind("f-flag", "flag");
+
+  // ---- websocket -------------------------------------------------------
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.onopen = () => { statusEl.textContent = "live"; statusEl.className = "up"; };
+    ws.onclose = () => {
+      statusEl.textContent = "disconnected"; statusEl.className = "down";
+      setTimeout(connect, 2000);
+    };
+    ws.onerror = () => ws.close();
+    ws.onmessage = ev => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      const batch = Array.isArray(msg) ? msg : [msg];
+      for (const c of batch) {
+        if (c && c.id == null) c.id = `${Date.now()}-${calls.length}`;
+        calls.push(c);
+        appendRow(c);
+      }
+      if (calls.length > MAX_ROWS) {
+        calls.splice(0, calls.length - MAX_ROWS);
+        render();
+      }
+    };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>
