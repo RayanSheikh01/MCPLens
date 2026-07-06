@@ -3,24 +3,24 @@
 from tests.mock_mcp import mock_mcp_server
 
 def test_proxy_jsonrpc_capture_and_ws_push(monkeypatch):
-    import httpx
+    import httpx2
     from fastapi.testclient import TestClient
     from proxy.proxy import app as proxy_app
 
     # use mock mcp server
     def handler(request):
         if request.url.path == "/test_path":
-            return httpx.Response(200, json=mock_mcp_server["test_path"])
-        return httpx.Response(404)
+            return httpx2.Response(200, json=mock_mcp_server["test_path"])
+        return httpx2.Response(404)
 
-    transport = httpx.MockTransport(handler)
-    real_init = httpx.AsyncClient.__init__
+    transport = httpx2.MockTransport(handler)
+    real_init = httpx2.AsyncClient.__init__
 
     def patched_init(self, *args, **kwargs):
         kwargs["transport"] = transport
         real_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
+    monkeypatch.setattr(httpx2.AsyncClient, "__init__", patched_init)
 
     call = {"jsonrpc": "2.0", "method": "test_method", "id": 1}
 
