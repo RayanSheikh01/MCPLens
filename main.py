@@ -19,12 +19,12 @@ CALL_COLUMNS = [
 
 
 def app():
-    from fastapi import FastAPI
+    # Serve the proxy app directly; it already exposes /mcp/{server}/{path},
+    # /ws, /api/* and the dashboard at /. Mounting it under a prefix would
+    # double the /mcp path segment and break forwarding.
     from proxy.proxy import app as proxy_app
 
-    app = FastAPI()
-    app.mount("/mcp", proxy_app)
-    return app
+    return proxy_app
 
 
 async def _ensure_calls_table(db):

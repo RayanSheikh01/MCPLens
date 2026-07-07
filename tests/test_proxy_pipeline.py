@@ -85,6 +85,48 @@ def test_non_toolscall_not_persisted(monkeypatch, tmp_path):
     assert rows == []
 
 
+def test_sse_toolscall_capture_persists_to_db(monkeypatch, tmp_path):
+    """Real MCP servers reply over SSE; tools/call must still be captured."""
+    from proxy import proxy as proxy_mod
+
+    db_file = tmp_path / "sse.db"
+    monkeypatch.setattr(proxy_mod, "DB_PATH", str(db_file))
+
+    def handler(request):
+        sse = (
+            'data: {"jsonrpc": "2.0", "id": 5, '
+            '"result": {"content": [{"type": "text", "text": "leak@example.com"}]}}\n\n'
+        )
+        return httpx2.Response(
+            200, content=sse.encode(), headers={"content-type": "text/event-stream"}
+        )
+
+    _patch_transport(monkeypatch, handler)
+
+    call = {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "find-tasks", "arguments": {}}}
+
+    with TestClient(proxy_mod.app) as client:
+        with client.stream("POST", "/mcp/upstream_host/mcp", json=call,
+                           headers={"mcp-session-id": "sse-sess"}) as resp:
+            assert resp.status_code == 200
+            list(resp.iter_bytes())  # drain stream so capture runs
+
+    from storage import db as db_mod
+    import asyncio
+
+    rows = asyncio.run(db_mod.list_calls(str(db_file)))
+    assert len(rows) == 1
+    record = dict(zip(
+        ["id", "session_id", "ts", "direction", "tool_name",
+         "input", "output", "latency_ms", "status", "flags"],
+        rows[0],
+    ))
+    assert record["tool_name"] == "find-tasks"
+    assert record["session_id"] == "sse-sess"
+    assert "DATA_EXFIL" in record["flags"]
+
+
 def test_export_returns_db_rows(monkeypatch, tmp_path):
     from proxy import proxy as proxy_mod
     from storage import db as db_mod

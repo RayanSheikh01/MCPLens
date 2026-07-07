@@ -35,6 +35,17 @@ CALL_COLUMNS = [
     "input", "output", "latency_ms", "status", "flags",
 ]
 
+# Headers that must not be forwarded verbatim to the upstream: Host would point
+# at the proxy (breaking name-based routing/TLS on real endpoints), and the
+# hop-by-hop / length headers are recomputed by the HTTP client per connection.
+_STRIP_HEADERS = {"host", "content-length", "connection", "transfer-encoding",
+                  "keep-alive", "proxy-connection", "upgrade"}
+
+
+def _forward_headers(headers: dict) -> dict:
+    """Drop hop-by-hop and Host headers so the client sets them per upstream."""
+    return {k: v for k, v in headers.items() if k.lower() not in _STRIP_HEADERS}
+
 
 def _resolve_url(server: str, path: str) -> str:
     """Map a server name to its upstream URL.
@@ -97,7 +108,7 @@ async def forward(server, path, request: fastapi.Request):
     persisting paired tools/call records, and broadcasting to WebSocket clients.
     """
     url = _resolve_url(server, path)
-    headers = dict(request.headers)
+    headers = _forward_headers(dict(request.headers))
     method = request.method
     body = await request.body()
     session_id = request.headers.get("mcp-session-id") or uuid.uuid4().hex
@@ -136,9 +147,19 @@ async def forward(server, path, request: fastapi.Request):
                             continue
                         data = line[len("data:"):].strip()
                         try:
-                            await hub.broadcast(json.loads(data))
+                            obj = json.loads(data)
                         except (json.JSONDecodeError, ValueError):
-                            pass
+                            continue
+                        # Pair tools/call responses → persist enriched records;
+                        # broadcast the record when paired, else the raw message.
+                        records = pairer.on_response(obj, ctx)
+                        if records:
+                            for record in records:
+                                _flag(record, [])
+                                await _capture(record)
+                                await hub.broadcast(record)
+                        else:
+                            await hub.broadcast(obj)
             finally:
                 await response.aclose()
                 await client.aclose()
@@ -192,7 +213,7 @@ async def replay_call(call: dict):
         return fastapi.Response(content="Missing 'server' or 'path' in call", status_code=400)
 
     url = _resolve_url(server, path)
-    headers = call.get("headers", {})
+    headers = _forward_headers(call.get("headers", {}))
     body = json.dumps(call.get("body", {})).encode("utf-8")
 
     client = httpx2.AsyncClient()
