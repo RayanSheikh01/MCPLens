@@ -6,4 +6,4 @@ servers:
     auth: "Bearer test-token"
 
 storage:
-  db_path: "./inspector.db"
+  db_path: "sessions.db"

@@ -1,25 +1,141 @@
 import json
+import time
+import uuid
+from datetime import datetime, timezone
 
+import aiosqlite
 import fastapi
 import httpx2
 
+from analyser import analyser
 from proxy.hub import Hub
+from storage import db as storage_db
 
 app = fastapi.FastAPI()
 hub = Hub()
 
+
+def _load_config():
+    """Load config.yaml if present; tolerate its absence (tests, fresh checkout)."""
+    try:
+        import config as config_mod
+        return config_mod.load_config()
+    except (FileNotFoundError, ImportError, Exception):
+        return {}
+
+
+_CFG = _load_config()
+SERVERS = _CFG.get("servers", {}) if isinstance(_CFG, dict) else {}
+DB_PATH = (
+    _CFG.get("storage", {}).get("db_path", "sessions.db")
+    if isinstance(_CFG, dict) else "sessions.db"
+)
+
+CALL_COLUMNS = [
+    "id", "session_id", "ts", "direction", "tool_name",
+    "input", "output", "latency_ms", "status", "flags",
+]
+
+
+def _resolve_url(server: str, path: str) -> str:
+    """Map a server name to its upstream URL.
+
+    Configured servers use their `upstream` from config.yaml; unknown names
+    fall back to treating the name as a host (`http://<server>/<path>`), which
+    keeps direct host:port targeting and the existing test behaviour working.
+    """
+    entry = SERVERS.get(server)
+    if entry and entry.get("upstream"):
+        base = entry["upstream"].rstrip("/")
+        return f"{base}/{path}" if path else base
+    return f"http://{server}/{path}"
+
+
+async def _ensure_db(path: str):
+    """Create the calls table if absent so capture can persist to any db path."""
+    db = await aiosqlite.connect(path)
+    try:
+        await db.execute('''
+        CREATE TABLE IF NOT EXISTS calls (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            ts TIMESTAMP,
+            direction TEXT,
+            tool_name TEXT,
+            input TEXT,
+            output TEXT,
+            latency_ms INTEGER,
+            status TEXT,
+            flags TEXT
+        )
+        ''')
+        await db.commit()
+    finally:
+        await db.close()
+
+
+def _build_record(session_id, req_body, resp_text, latency_ms):
+    """Pair a captured tools/call request with its response into a CallRecord.
+
+    Returns None for requests that are not `tools/call` (only those are paired,
+    per the interceptor contract).
+    """
+    try:
+        req = json.loads(req_body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(req, dict) or req.get("method") != "tools/call":
+        return None
+
+    params = req.get("params", {}) or {}
+    tool_name = params.get("name") or "tools/call"
+
+    status = "success"
+    try:
+        resp = json.loads(resp_text)
+        if isinstance(resp, dict) and "error" in resp:
+            status = "error"
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    record = {
+        "id": uuid.uuid4().hex,
+        "session_id": session_id,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "direction": "response",
+        "tool_name": tool_name,
+        "input": json.dumps(params),
+        "output": resp_text,
+        "latency_ms": int(latency_ms),
+        "status": status,
+        "flags": "[]",
+    }
+    # analyser flags live traffic; known tool schema keyed by name so it is
+    # not reported as "unknown".
+    flags = analyser.analyse(record, [], {tool_name: {}})
+    record["flags"] = json.dumps(flags)
+    return record
+
+
+async def _capture(record):
+    """Persist a CallRecord to the DB the CLI/dashboard read from."""
+    await _ensure_db(DB_PATH)
+    await storage_db.insert_call(DB_PATH, record)
+
+
 @app.api_route("/mcp/{server}/{path:path}", methods=["GET", "POST", "DELETE"])
 async def forward(server, path, request: fastapi.Request):
     """
-    Forward the request to the specified server and path, capturing the
-    JSON-RPC call and broadcasting it to connected WebSocket clients.
+    Forward the request to the resolved upstream, capturing the JSON-RPC call,
+    persisting paired tools/call records, and broadcasting to WebSocket clients.
     """
-    url = f"http://{server}/{path}"
+    url = _resolve_url(server, path)
     headers = dict(request.headers)
     method = request.method
     body = await request.body()
+    session_id = request.headers.get("mcp-session-id") or uuid.uuid4().hex
 
-    # Capture the outgoing JSON-RPC call.
+    # Broadcast the raw outgoing JSON-RPC call to live dashboard clients.
     try:
         await hub.broadcast(json.loads(body))
     except (json.JSONDecodeError, ValueError):
@@ -27,6 +143,7 @@ async def forward(server, path, request: fastapi.Request):
 
     client = httpx2.AsyncClient()
     req = client.build_request(method, url, headers=headers, content=body)
+    t_start = time.perf_counter()
     response = await client.send(req, stream=True)
     content_type = response.headers.get("content-type", "")
 
@@ -61,9 +178,17 @@ async def forward(server, path, request: fastapi.Request):
         )
 
     content = await response.aread()
+    latency_ms = (time.perf_counter() - t_start) * 1000
     await response.aclose()
     await client.aclose()
+
+    # Pair request↔response and persist tools/call records.
+    record = _build_record(session_id, body, content.decode("utf-8", errors="ignore"), latency_ms)
+    if record is not None:
+        await _capture(record)
+
     return fastapi.Response(content=content, status_code=response.status_code, headers=dict(response.headers))
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: fastapi.WebSocket):
@@ -82,7 +207,6 @@ async def websocket_endpoint(websocket: fastapi.WebSocket):
         hub.unregister(queue)
 
 
-
 @app.post("/api/replay")
 async def replay_call(call: dict):
     """
@@ -93,7 +217,7 @@ async def replay_call(call: dict):
     if not server or not path:
         return fastapi.Response(content="Missing 'server' or 'path' in call", status_code=400)
 
-    url = f"http://{server}/{path}"
+    url = _resolve_url(server, path)
     headers = call.get("headers", {})
     body = json.dumps(call.get("body", {})).encode("utf-8")
 
@@ -106,12 +230,15 @@ async def replay_call(call: dict):
 
     return fastapi.Response(content=content, status_code=response.status_code, headers=dict(response.headers))
 
+
 @app.get("/api/export")
 async def export_calls():
     """
-    Export captured calls as JSON.
+    Export captured calls from the database as JSON.
     """
-    calls = hub.clients
+    await _ensure_db(DB_PATH)
+    rows = await storage_db.list_calls(DB_PATH)
+    calls = [dict(zip(CALL_COLUMNS, row)) for row in rows]
     return fastapi.responses.JSONResponse(content=calls)
 
 
