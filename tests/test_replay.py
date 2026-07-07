@@ -34,3 +34,5 @@ def test_replay_confirm_skip(seeded_db):
     assert result.exit_code == 0
     assert "Skipping send_email" in result.output
     assert "Firing request: send_email" not in result.output
+
+
