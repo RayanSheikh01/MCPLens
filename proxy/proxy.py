@@ -1,7 +1,5 @@
 import json
-import time
 import uuid
-from datetime import datetime, timezone
 
 import aiosqlite
 import fastapi
@@ -9,6 +7,7 @@ import httpx2
 
 from analyser import analyser
 from proxy.hub import Hub
+from proxy.interceptor import Pairer, parse_jsonrpc
 from storage import db as storage_db
 
 app = fastapi.FastAPI()
@@ -74,45 +73,13 @@ async def _ensure_db(path: str):
         await db.close()
 
 
-def _build_record(session_id, req_body, resp_text, latency_ms):
-    """Pair a captured tools/call request with its response into a CallRecord.
+def _flag(record, history):
+    """Run the analyser over a paired record; store flags as JSON text.
 
-    Returns None for requests that are not `tools/call` (only those are paired,
-    per the interceptor contract).
+    Tool schema is keyed by the record's tool name so a captured tool is not
+    reported as "unknown".
     """
-    try:
-        req = json.loads(req_body)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(req, dict) or req.get("method") != "tools/call":
-        return None
-
-    params = req.get("params", {}) or {}
-    tool_name = params.get("name") or "tools/call"
-
-    status = "success"
-    try:
-        resp = json.loads(resp_text)
-        if isinstance(resp, dict) and "error" in resp:
-            status = "error"
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    record = {
-        "id": uuid.uuid4().hex,
-        "session_id": session_id,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "direction": "response",
-        "tool_name": tool_name,
-        "input": json.dumps(params),
-        "output": resp_text,
-        "latency_ms": int(latency_ms),
-        "status": status,
-        "flags": "[]",
-    }
-    # analyser flags live traffic; known tool schema keyed by name so it is
-    # not reported as "unknown".
-    flags = analyser.analyse(record, [], {tool_name: {}})
+    flags = analyser.analyse(record, history, {record["tool_name"]: {}})
     record["flags"] = json.dumps(flags)
     return record
 
@@ -135,15 +102,21 @@ async def forward(server, path, request: fastapi.Request):
     body = await request.body()
     session_id = request.headers.get("mcp-session-id") or uuid.uuid4().hex
 
-    # Broadcast the raw outgoing JSON-RPC call to live dashboard clients.
-    try:
-        await hub.broadcast(json.loads(body))
-    except (json.JSONDecodeError, ValueError):
-        pass
+    # Pair requests with their responses. Only tools/call requests yield
+    # persisted records; other traffic is broadcast raw for the live tail.
+    pairer = Pairer()
+    ctx = {"session_id": session_id}
+    req_objs = parse_jsonrpc(body)
+    is_toolscall = any(o.get("method") == "tools/call" for o in req_objs)
+    for obj in req_objs:
+        pairer.on_request(obj, ctx)
+
+    if not is_toolscall and req_objs:
+        # Non tools/call: no record to build, so surface the raw call live.
+        await hub.broadcast(req_objs[0] if len(req_objs) == 1 else req_objs)
 
     client = httpx2.AsyncClient()
     req = client.build_request(method, url, headers=headers, content=body)
-    t_start = time.perf_counter()
     response = await client.send(req, stream=True)
     content_type = response.headers.get("content-type", "")
 
@@ -178,14 +151,15 @@ async def forward(server, path, request: fastapi.Request):
         )
 
     content = await response.aread()
-    latency_ms = (time.perf_counter() - t_start) * 1000
     await response.aclose()
     await client.aclose()
 
-    # Pair request↔response and persist tools/call records.
-    record = _build_record(session_id, body, content.decode("utf-8", errors="ignore"), latency_ms)
-    if record is not None:
-        await _capture(record)
+    # Pair response↔request; flag, persist, and broadcast enriched records.
+    for resp_obj in parse_jsonrpc(content):
+        for record in pairer.on_response(resp_obj, ctx):
+            _flag(record, [])
+            await _capture(record)
+            await hub.broadcast(record)
 
     return fastapi.Response(content=content, status_code=response.status_code, headers=dict(response.headers))
 

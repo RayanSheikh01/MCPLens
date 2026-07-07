@@ -9,7 +9,7 @@ dependencies = [
     "httpx2",
     "aiosqlite",
     "jsonschema",
-    "typer",
+    "click",
     "pyyaml",
 ]
 
